@@ -83,13 +83,10 @@ class NADS_Net(torch.nn.Module):
     def __init__(self):
         super(NADS_Net, self).__init__()
 
-        self.resnet50_modules = nn.ModuleList(list(torch.hub.load('pytorch/vision:v0.6.0', 'resnet50', pretrained=True).children())[:-2]).eval()
-        # self.resnet50_modules = nn.ModuleList(list(resnet50(pretrained=True).children())[:-2]).eval()
-        self.FPN = self._make_FPN()
-        # self.parts_heatmap_branch = self._make_map_branch(10)
-        # self.PAF_branch = self._make_map_branch(16)
-        self.parts_heatmap_branch = self._make_map_branch(19)
-        self.PAF_branch = self._make_map_branch(38)
+        self.resnet50_modules = nn.ModuleList(list(resnet50(pretrained=True).children())[:-2]).eval()
+        self.FPN = FPN()
+        self.keypoint_heatmap_branch = Map_Branch(19)
+        self.PAF_branch = Map_Branch(38)
 
         def init_weights(m):
             if type(m) == nn.Conv2d:
@@ -99,12 +96,6 @@ class NADS_Net(torch.nn.Module):
         self.FPN.apply(init_weights)
         self.parts_heatmap_branch.apply(init_weights)
         self.PAF_branch.apply(init_weights)
-
-    def _make_FPN(self):
-        return FPN()
-
-    def _make_map_branch(self, num_output_channels):
-        return Map_Branch(num_output_channels)
 
     def forward(self, x, part_heatmap_masks, PAF_masks):
         resnet50_outputs = []
