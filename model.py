@@ -58,9 +58,41 @@ class Map_Branch(nn.Module):
             nn.Conv2d(256, num_channels_output, kernel_size=1, stride=1, padding=0)
         )
 
-    def _upsample(self, x, scale_factor):
-        _, _, height, width = target.shape
-        return F.upsample(x, scale_factor=scale_factor, mode='bilinear')
+    def _two_conv(self):
+        return nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, P2, P3, P4, P5):
+        D5 = F.interpolate(self.convs_on_P5(P5), scale_factor=8, mode='bilinear')
+        D4 = F.interpolate(self.convs_on_P4(P4), scale_factor=4, mode='bilinear')
+        D3 = F.interpolate(self.convs_on_P3(P3), scale_factor=2, mode='bilinear')
+        D2 = self.convs_on_P2(P2)
+
+        feature_maps = torch.cat((D2, D3, D4, D5), dim=1)
+
+        return self.convs_on_feature_maps(feature_maps)
+
+# Using 2 2x upscaling interpolations
+class Segmentation_Branch(nn.Module):
+    def __init__(self):
+        super(Segmentation_Branch, self).__init__()
+
+        self.convs_on_P5 = self._two_conv()
+        self.convs_on_P4 = self._two_conv()
+        self.convs_on_P3 = self._two_conv()
+        self.convs_on_P2 = self._two_conv()
+
+        self.conv_on_feature_maps = nn.Sequential(
+            nn.Conv2d(512, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+        )
+
+        self.final_conv1 = nn.Conv2d(128, 32, kernel_size=3, stride=1, padding=1)
+        self.final_conv2 = nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1)
 
     def _two_conv(self):
         return nn.Sequential(
@@ -71,7 +103,6 @@ class Map_Branch(nn.Module):
         )
 
     def forward(self, P2, P3, P4, P5):
-        # No ReLu???
         D5 = F.interpolate(self.convs_on_P5(P5), scale_factor=8, mode='bilinear')
         D4 = F.interpolate(self.convs_on_P4(P4), scale_factor=4, mode='bilinear')
         D3 = F.interpolate(self.convs_on_P3(P3), scale_factor=2, mode='bilinear')
@@ -79,11 +110,19 @@ class Map_Branch(nn.Module):
 
         feature_maps = torch.cat((D2, D3, D4, D5), dim=1)
 
-        return self.convs_on_feature_maps(feature_maps)
+        segmentation = F.interpolate(self.conv_on_feature_maps(feature_maps), scale_factor=2, mode='bilinear')
+        segmentation = self.final_conv1(segmentation)
+        segmentation = F.interpolate(segmentation, scale_factor=2, mode='bilinear')
+        segmentation = self.final_conv2(segmentation)
+        segmentation = (F.tanh(segmentation) + 1)/2
+
+        return segmentation
 
 class NADS_Net(torch.nn.Module):
-    def __init__(self, include_background_output, using_Aisin_output_format):
+    def __init__(self, include_seatbelt_branch, using_Aisin_output_format, include_background_output):
         super(NADS_Net, self).__init__()
+
+        self.include_seatbelt_branch = include_seatbelt_branch
 
         if using_Aisin_output_format:
             if include_background_output:
@@ -101,6 +140,9 @@ class NADS_Net(torch.nn.Module):
         self.keypoint_heatmap_branch = Map_Branch(num_keypoints_output_layers)
         self.PAF_branch = Map_Branch(num_PAF_output_layers)
 
+        if include_seatbelt_branch:
+            self.seatbelt_segmentation_branch = Segmentation_Branch()
+
         def init_weights(m):
             if type(m) == nn.Conv2d:
                 torch.nn.init.normal_(m.weight, mean=0, std=0.01)
@@ -110,7 +152,10 @@ class NADS_Net(torch.nn.Module):
         self.keypoint_heatmap_branch.apply(init_weights)
         self.PAF_branch.apply(init_weights)
 
-    def forward(self, x, keypoint_heatmap_masks, PAF_masks):
+        if include_seatbelt_branch:
+            self.seatbelt_segmentation_branch.apply(init_weights)
+
+    def forward(self, x, keypoint_heatmap_masks=None, PAF_masks=None):
         resnet50_outputs = []
         for i, model in enumerate(self.resnet50_modules):
             x = model(x)
@@ -123,7 +168,13 @@ class NADS_Net(torch.nn.Module):
         keypoint_heatmaps = self.keypoint_heatmap_branch(P2, P3, P4, P5)
         PAFs = self.PAF_branch(P2, P3, P4, P5)
 
-        keypoint_heatmaps *= keypoint_heatmap_masks
-        PAFs *= PAF_masks
+        if keypoint_heatmap_masks:
+            keypoint_heatmaps *= keypoint_heatmap_masks
+        if PAF_masks:
+            PAFs *= PAF_masks
 
-        return keypoint_heatmaps, PAFs
+        if self.include_seatbelt_branch:
+            seatbelt_segmentation = self.seatbelt_segmentation_branch(P2, P3, P4, P5)
+            return keypoint_heatmaps, PAFs, seatbelt_segmentation
+        else:
+            return keypoint_heatmaps, PAFs

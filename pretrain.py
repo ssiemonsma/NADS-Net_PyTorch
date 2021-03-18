@@ -2,13 +2,13 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
-from dataset_generator import Dataset_Generator, CanonicalConfig, COCOSourceConfig
+from dataset_generator import Dataset_Generator_MS_COCO, CanonicalConfig, COCOSourceConfig
 from model import NADS_Net
 from tqdm import tqdm
 import numpy as np
 
-filename = 'weights.pth'
-pretrained_filename = 'weight.pth'
+filename = 'weights_pretraining.pth'
+pretrained_filename = 'weights_pretraining.pth'
 
 # Training Parameters
 start_from_pretrained = False
@@ -16,32 +16,30 @@ num_training_epochs = 100
 batch_size = 10
 # starting_lr = 8e-6  # For Adam optimizer
 starting_lr = 2e-6  # For SGD
-lr_schedule_type = 'fixed'
-# lr_schedule_type = 'metric-based'
-lr_gamma = 0.6  # (for both fixed and metric-based scheduler) This is the factor the learning rate decreases by after the metric doesn't improve for some time
-patience = 3   # (for metric-based scheduler only) The number of epochs that must pass without metric improvement for the learning rate to decrease
+# lr_schedule_type = 'fixed'
+lr_schedule_type = 'metric-based'
+lr_gamma = 0.8  # (for both fixed and metric-based scheduler) This is the factor the learning rate decreases by after the metric doesn't improve for some time
+patience = 4   # (for metric-based scheduler only) The number of epochs that must pass without metric improvement for the learning rate to decrease
 step_size = 20   # (for fixed scheduler only) After this many epochs without improvement, the learning rate is decreased
 weight_decay = 5e-7
-num_dataloader_threads = 0  # Note: Keep this at 0 for the time being
+num_dataloader_threads = 4
+include_seatbelt_branch = False
 include_background_output = False
 using_Aisin_output_format = True
 
 # Instantiate the Network
-torch.set_default_tensor_type('torch.cuda.FloatTensor')
 device = torch.device("cuda:0")
-net = NADS_Net(include_background_output, using_Aisin_output_format).to(device)
+net = NADS_Net(include_seatbelt_branch, using_Aisin_output_format, include_background_output).to(device)
 print('Network contains', sum([p.numel() for p in net.parameters()]), 'parameters.')
-# from torchsummary import summary
-# print(summary(net, (3, 384, 384)))
 
 # Create the Data Loaders
-train_dataset = Dataset_Generator(CanonicalConfig(), COCOSourceConfig("../COCO_Dataset/coco_train_dataset.h5"), include_background_output, using_Aisin_output_format)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, num_workers=num_dataloader_threads, shuffle=True, drop_last=False)
+train_dataset = Dataset_Generator_MS_COCO(CanonicalConfig(), COCOSourceConfig("../COCO_Dataset/coco_train_dataset.h5"), using_Aisin_output_format, include_background_output, augment=True)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, num_workers=num_dataloader_threads, pin_memory=True, shuffle=True, drop_last=False)
 num_training_samples = len(train_dataset)
 print('Number of training samples = %i' % num_training_samples)
 
-valid_dataset = Dataset_Generator(CanonicalConfig(), COCOSourceConfig("../COCO_Dataset/coco_val_dataset.h5"), include_background_output, using_Aisin_output_format)
-valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_dataloader_threads,shuffle=False, drop_last=False)
+valid_dataset = Dataset_Generator_MS_COCO(CanonicalConfig(), COCOSourceConfig("../COCO_Dataset/coco_val_dataset.h5"), using_Aisin_output_format, include_background_output, augment=False)
+valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_dataloader_threads, pin_memory=True, shuffle=False, drop_last=False)
 num_validation_samples = len(valid_dataset)
 print('Number of validation samples = %i' % num_validation_samples)
 
@@ -74,10 +72,6 @@ for epoch in range(num_training_epochs):
     progress_bar = tqdm(train_loader)
     for i, data in enumerate(progress_bar):
         input_images, keypoint_heatmap_masks, PAF_masks, keypoint_heatmap_labels, PAF_labels = data[0].to(device), data[1].to(device), data[2].to(device), data[3].float().to(device), data[4].float().to(device)
-        # keypoint_heatmap_masks = keypoint_heatmap_masks[:,:10,:,:]
-        # PAF_masks = PAF_masks[:,:16,:,:]
-        # keypoint_heatmap_labels = keypoint_heatmap_labels[:,:10,:,:]
-        # PAF_labels = PAF_labels[:,:16,:,:]
 
         # Zero the parameter gradients
         optimizer.zero_grad()
@@ -87,11 +81,11 @@ for epoch in range(num_training_epochs):
 
         if include_background_output and using_Aisin_output_format:
             # Background layer is not used in algorithm, so we're not going to track its loss
-            keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap[:,:9,:,:], keypoint_heatmap_labels[:,:9,:,:], batch_size)
+            keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap[:,:9,:,:], keypoint_heatmap_labels[:,:9,:,:], len(input_images))
         else:
-            keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap, keypoint_heatmap_labels, batch_size)
+            keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap, keypoint_heatmap_labels, len(input_images))
 
-        PAF_MSE_loss = MSE_criterion(PAFs, PAF_labels, batch_size)
+        PAF_MSE_loss = MSE_criterion(PAFs, PAF_labels, len(input_images))
 
         MSE_loss = keypoint_heatmap_MSE_loss + PAF_MSE_loss
 
@@ -128,11 +122,7 @@ for epoch in range(num_training_epochs):
 
         progress_bar = tqdm(valid_loader)
         for i, data in enumerate(progress_bar):
-            input_images, part_heatmap_masks, PAF_masks, keypoint_heatmap_masks, PAF_labels = data[0].to(device), data[1].to(device), data[2].to(device), data[3].to(device), data[4].to(device)
-            # keypoint_heatmap_masks = keypoint_heatmap_masks[:, :10, :, :]
-            # PAF_masks = PAF_masks[:, :16, :, :]
-            # keypoint_heatmap_labels = keypoint_heatmap_labels[:, :10, :, :]
-            # PAF_labels = PAF_labels[:, :16, :, :]
+            input_images, keypoint_heatmap_masks, PAF_masks, keypoint_heatmap_labels, PAF_labels = data[0].to(device), data[1].to(device), data[2].to(device), data[3].to(device), data[4].to(device)
 
             # Zero the parameter gradients
             optimizer.zero_grad()
@@ -142,11 +132,11 @@ for epoch in range(num_training_epochs):
 
             if include_background_output and using_Aisin_output_format:
                 # Background layer is not used in algorithm, so we're not going to track its loss
-                keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap[:, :9, :, :], keypoint_heatmap_labels[:, :9, :, :], batch_size)
+                keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap[:, :9, :, :], keypoint_heatmap_labels[:, :9, :, :], len(input_images))
             else:
-                keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap, keypoint_heatmap_labels, batch_size)
+                keypoint_heatmap_MSE_loss = MSE_criterion(keypoint_heatmap, keypoint_heatmap_labels, len(input_images))
 
-            PAF_MSE_loss = MSE_criterion(PAFs, PAF_labels, batch_size)
+            PAF_MSE_loss = MSE_criterion(PAFs, PAF_labels, len(input_images))
 
             MSE_loss = keypoint_heatmap_MSE_loss + PAF_MSE_loss
 
