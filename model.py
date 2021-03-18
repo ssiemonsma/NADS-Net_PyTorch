@@ -168,9 +168,9 @@ class NADS_Net(torch.nn.Module):
         keypoint_heatmaps = self.keypoint_heatmap_branch(P2, P3, P4, P5)
         PAFs = self.PAF_branch(P2, P3, P4, P5)
 
-        if keypoint_heatmap_masks:
+        if keypoint_heatmap_masks is not None:
             keypoint_heatmaps *= keypoint_heatmap_masks
-        if PAF_masks:
+        if PAF_masks is not None:
             PAFs *= PAF_masks
 
         if self.include_seatbelt_branch:
